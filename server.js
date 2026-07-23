@@ -1,4 +1,5 @@
 require('dotenv').config();
+const congeRoutes = require('./src/routes/congeRoutes');
 const importRoutes = require('./src/routes/importRoutes');
 const rhRoutes = require('./src/routes/rhRoutes');
 const express = require('express');
@@ -28,6 +29,7 @@ app.use('/api/rc', rcRoutes);
 startExpirationJob();
 app.use('/api/rh', rhRoutes);
 app.use('/api/import', importRoutes);
+app.use('/api/conges', congeRoutes);
 app.listen(PORT, () => {
   console.log(`✅ Serveur démarré sur http://localhost:${PORT}`);
 });

@@ -5,7 +5,10 @@ const { verifyToken, checkRole } = require('../middlewares/authMiddleware');
 
 router.use(verifyToken);
 
-router.post('/declarer', rcController.declarerRC);
+router.post('/declarer-pour-employe', checkRole([2]), rcController.declarerRCPourEmploye);
+router.get('/employes-structure', checkRole([2]), rcController.getEmployesDeStructure);
+router.put('/:id/modifier', checkRole([3]), rcController.modifierRC);
+router.delete('/:id', checkRole([3]), rcController.supprimerRC);
 router.put('/:id/valider', checkRole([2, 3]), rcController.validerRC);
 router.get('/solde', rcController.getSolde);
 router.get('/solde/:userId', checkRole([2, 3]), rcController.getSolde);

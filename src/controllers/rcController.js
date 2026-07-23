@@ -1,24 +1,74 @@
 const pool = require('../config/db');
 
 // 1. L'employé déclare un jour travaillé donnant droit à un RC
-exports.declarerRC = async (req, res) => {
+// Le Chef déclare un ou plusieurs RC pour un employé de sa structure
+exports.declarerRCPourEmploye = async (req, res) => {
   try {
-    const { date_travail, motif } = req.body;
-    const utilisateur_id = req.user.id;
+    const { utilisateur_id, date_travail, motif, nombre_jours } = req.body;
+    const chef_id = req.user.id;
 
-    if (!date_travail) {
-      return res.status(400).json({ success: false, message: 'La date travaillée est requise' });
+    if (!utilisateur_id || !date_travail || !nombre_jours || nombre_jours < 1) {
+      return res.status(400).json({ success: false, message: 'Champs manquants ou invalides' });
     }
 
-    const [result] = await pool.query(
-      `INSERT INTO rc (utilisateur_id, date_travail, motif, date_acquisition, date_expiration, statut)
-       VALUES (?, ?, ?, ?, ?, 'En attente')`,
-      [utilisateur_id, date_travail, motif || null, date_travail, date_travail]
+    // Vérifier que l'employé appartient bien à la même structure que le chef
+    const [chefRows] = await pool.query('SELECT departement_id FROM utilisateurs WHERE id = ?', [chef_id]);
+    const [empRows] = await pool.query('SELECT departement_id, nom, prenom FROM utilisateurs WHERE id = ?', [utilisateur_id]);
+
+    if (empRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Employé introuvable' });
+    }
+    if (chefRows[0].departement_id !== empRows[0].departement_id) {
+      return res.status(403).json({ success: false, message: 'Cet employé n\'appartient pas à votre structure' });
+    }
+
+    // Créer un RC par jour déclaré, statut "Validé Chef" directement (le chef déclare = validation niveau 1 déjà faite)
+    const idsCreated = [];
+    for (let i = 0; i < nombre_jours; i++) {
+      const [result] = await pool.query(
+        `INSERT INTO rc (utilisateur_id, date_travail, motif, date_acquisition, date_expiration, statut, valide_par)
+         VALUES (?, ?, ?, ?, ?, 'Validé Chef', ?)`,
+        [utilisateur_id, date_travail, motif || null, date_travail, date_travail, chef_id]
+      );
+      idsCreated.push(result.insertId);
+    }
+
+    // Notifier l'employé immédiatement
+    await pool.query(
+      `INSERT INTO notifications (utilisateur_id, type_alerte, message) VALUES (?, 'Validation Chef', ?)`,
+      [utilisateur_id, `Votre chef vous a déclaré ${nombre_jours} jour(s) RC pour le ${date_travail}${motif ? ' - Motif : ' + motif : ''}. En attente de validation RH.`]
     );
 
-    res.status(201).json({ success: true, message: 'RC déclaré, en attente de validation', id: result.insertId });
+    // Notifier tous les RH pour validation finale
+    const [rhUsers] = await pool.query(`SELECT id FROM utilisateurs WHERE role_id = 3 AND actif = 1`);
+    for (const rh of rhUsers) {
+      await pool.query(
+        `INSERT INTO notifications (utilisateur_id, type_alerte, message) VALUES (?, 'Validation RH', ?)`,
+        [rh.id, `${empRows[0].prenom} ${empRows[0].nom} : ${nombre_jours} jour(s) RC déclaré(s) par le chef, en attente de validation.`]
+      );
+    }
+
+    res.status(201).json({ success: true, message: `${nombre_jours} RC déclaré(s) pour l'employé`, ids: idsCreated });
   } catch (error) {
-    console.error('Erreur declarerRC:', error);
+    console.error('Erreur declarerRCPourEmploye:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// Liste des employés de la structure du chef (pour le formulaire de déclaration)
+exports.getEmployesDeStructure = async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT u.id, u.matricule, u.nom, u.prenom
+       FROM utilisateurs u
+       WHERE u.departement_id = (SELECT departement_id FROM utilisateurs WHERE id = ?)
+         AND u.role_id = 1 AND u.actif = 1
+       ORDER BY u.nom ASC`,
+      [req.user.id]
+    );
+    res.json({ success: true, employes: rows });
+  } catch (error) {
+    console.error('Erreur getEmployesDeStructure:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 };
@@ -191,6 +241,50 @@ exports.marquerNotificationLue = async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Erreur marquerNotificationLue:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+// RH modifie un RC avant validation finale (date ou motif)
+exports.modifierRC = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { date_travail, motif } = req.body;
+
+    const [rcRows] = await pool.query('SELECT * FROM rc WHERE id = ?', [id]);
+    if (rcRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'RC introuvable' });
+    }
+    if (rcRows[0].statut !== 'Validé Chef') {
+      return res.status(400).json({ success: false, message: 'Seuls les RC en attente de validation RH peuvent être modifiés' });
+    }
+
+    await pool.query(
+      `UPDATE rc SET date_travail = ?, motif = ? WHERE id = ?`,
+      [date_travail || rcRows[0].date_travail, motif ?? rcRows[0].motif, id]
+    );
+
+    res.json({ success: true, message: 'RC modifié' });
+  } catch (error) {
+    console.error('Erreur modifierRC:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// RH supprime un RC avant validation (ex: erreur de saisie du chef)
+exports.supprimerRC = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rcRows] = await pool.query('SELECT * FROM rc WHERE id = ?', [id]);
+    if (rcRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'RC introuvable' });
+    }
+    if (rcRows[0].statut !== 'Validé Chef') {
+      return res.status(400).json({ success: false, message: 'Seuls les RC en attente de validation RH peuvent être supprimés' });
+    }
+    await pool.query(`DELETE FROM rc WHERE id = ?`, [id]);
+    res.json({ success: true, message: 'RC supprimé' });
+  } catch (error) {
+    console.error('Erreur supprimerRC:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 };
