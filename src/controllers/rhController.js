@@ -12,7 +12,6 @@ exports.getUtilisateurs = async (req, res) => {
     let params = [];
 
     if (req.user.role_id === 2) {
-      // Chef : uniquement les employés de sa propre structure
       query += ` WHERE u.departement_id = (SELECT departement_id FROM utilisateurs WHERE id = ?) AND r.nom = 'Employe'`;
       params = [req.user.id];
     }
@@ -27,7 +26,6 @@ exports.getUtilisateurs = async (req, res) => {
   }
 };
 
-// Créer un utilisateur (le RH peut créer employé/chef/RH)
 exports.creerUtilisateur = async (req, res) => {
   try {
     const { matricule, nom, prenom, email, mot_de_passe, role_id, departement_id, chef_id } = req.body;
@@ -55,7 +53,6 @@ exports.creerUtilisateur = async (req, res) => {
   }
 };
 
-// Activer / désactiver un utilisateur (au lieu de le supprimer, pour garder l'historique)
 exports.toggleActif = async (req, res) => {
   try {
     const { id } = req.params;
@@ -74,7 +71,6 @@ exports.toggleActif = async (req, res) => {
   }
 };
 
-// Modifier le rôle/département/chef d'un utilisateur
 exports.modifierUtilisateur = async (req, res) => {
   try {
     const { id } = req.params;
@@ -85,7 +81,6 @@ exports.modifierUtilisateur = async (req, res) => {
       [matricule, nom, prenom, email, role_id, departement_id, id]
     );
 
-    // Si un nouveau mot de passe est fourni, on le hash et on le met à jour séparément
     if (nouveau_mot_de_passe && nouveau_mot_de_passe.trim() !== '') {
       const bcrypt = require('bcryptjs');
       const hash = await bcrypt.hash(nouveau_mot_de_passe, 10);
@@ -98,7 +93,7 @@ exports.modifierUtilisateur = async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 };
-// Départements : lister
+
 exports.getDepartements = async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM departements ORDER BY nom ASC');
@@ -108,7 +103,6 @@ exports.getDepartements = async (req, res) => {
   }
 };
 
-// Départements : créer
 exports.creerDepartement = async (req, res) => {
   try {
     const { nom } = req.body;
@@ -121,7 +115,6 @@ exports.creerDepartement = async (req, res) => {
   }
 };
 
-// Statistiques globales
 exports.getStatistiques = async (req, res) => {
   try {
     const [parStatut] = await pool.query(
@@ -155,7 +148,6 @@ exports.getStatistiques = async (req, res) => {
   }
 };
 
-// Liste des employés avec leur solde RC disponible (pour la page Récupération)
 exports.getRCParEmploye = async (req, res) => {
   try {
     let query = `SELECT u.id, u.matricule, u.nom, u.prenom, d.nom AS departement,
@@ -180,6 +172,7 @@ exports.getRCParEmploye = async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 };
+
 // Statistiques : nombre de jours RC par structure, regroupés par mois/trimestre/année
 exports.getStatistiquesStructure = async (req, res) => {
   try {
@@ -210,18 +203,48 @@ exports.getStatistiquesStructure = async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 };
+
+// Statistiques : nombre de jours RC par employé, au sein de chaque structure, regroupés par mois/trimestre/année
+// Utilisé pour le détail dépliable sous chaque ligne de structure dans la page Statistiques
+exports.getStatistiquesEmployes = async (req, res) => {
+  try {
+    const periode = req.query.periode || 'mois'; // 'mois' | 'trimestre' | 'annee'
+
+    let periodeExpr;
+    if (periode === 'annee') {
+      periodeExpr = `YEAR(rc.date_travail)`;
+    } else if (periode === 'trimestre') {
+      periodeExpr = `CONCAT(YEAR(rc.date_travail), '-T', QUARTER(rc.date_travail))`;
+    } else {
+      periodeExpr = `DATE_FORMAT(rc.date_travail, '%Y-%m')`;
+    }
+
+    const [rows] = await pool.query(
+      `SELECT d.nom AS structure, u.id AS employe_id,
+              CONCAT(u.prenom, ' ', u.nom) AS employe, u.matricule,
+              ${periodeExpr} AS periode, COUNT(rc.id) AS nombre_jours
+       FROM rc
+       JOIN utilisateurs u ON rc.utilisateur_id = u.id
+       JOIN departements d ON u.departement_id = d.id
+       WHERE rc.statut IN ('Disponible', 'Utilisé', 'Expiré', 'Validé Chef', 'En attente')
+       GROUP BY d.nom, u.id, employe, u.matricule, periode
+       ORDER BY d.nom ASC, employe ASC, periode DESC`
+    );
+
+    res.json({ success: true, periode, donnees: rows });
+  } catch (error) {
+    console.error('Erreur getStatistiquesEmployes:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 // Suppression définitive d'un utilisateur (et de toutes ses données liées)
 exports.supprimerUtilisateur = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // 1. Détacher les employés qui avaient cette personne comme chef
     await pool.query(`UPDATE utilisateurs SET chef_id = NULL WHERE chef_id = ?`, [id]);
-
-    // 2. Supprimer les notifications liées
     await pool.query(`DELETE FROM notifications WHERE utilisateur_id = ?`, [id]);
-
-    // 3. Supprimer les détails de demandes de congé liées à ses RC ou ses demandes
     await pool.query(
       `DELETE drd FROM demande_rc_details drd
        JOIN demandes_conge_rc d ON drd.demande_id = d.id
@@ -234,17 +257,9 @@ exports.supprimerUtilisateur = async (req, res) => {
        WHERE rc.utilisateur_id = ?`,
       [id]
     );
-
-    // 4. Supprimer ses demandes de congé
     await pool.query(`DELETE FROM demandes_conge_rc WHERE utilisateur_id = ? OR valide_par = ?`, [id, id]);
-
-    // 5. Supprimer ses RC
     await pool.query(`DELETE FROM rc WHERE utilisateur_id = ? OR valide_par = ?`, [id, id]);
-
-    // 6. Supprimer ses entrées du journal d'audit
     await pool.query(`DELETE FROM journal_audit WHERE utilisateur_id = ?`, [id]);
-
-    // 7. Enfin, supprimer l'utilisateur lui-même
     await pool.query(`DELETE FROM utilisateurs WHERE id = ?`, [id]);
 
     res.json({ success: true, message: 'Employé supprimé définitivement' });

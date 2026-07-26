@@ -17,6 +17,7 @@ router.put('/utilisateurs/:id', checkRole([3]), rhController.modifierUtilisateur
 router.post('/departements', checkRole([3]), rhController.creerDepartement);
 router.get('/statistiques', checkRole([3]), rhController.getStatistiques);
 router.get('/statistiques-structure', checkRole([3]), rhController.getStatistiquesStructure);
+router.get('/statistiques-employes', checkRole([3]), rhController.getStatistiquesEmployes);
 router.delete('/utilisateurs/:id', checkRole([3]), rhController.supprimerUtilisateur);
 
 module.exports = router;

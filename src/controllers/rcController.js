@@ -22,6 +22,19 @@ exports.declarerRCPourEmploye = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Cet employé n\'appartient pas à votre structure' });
     }
 
+    // ⚠️ Empêcher la déclaration en double : un RC existe-t-il déjà pour cet employé à cette date ?
+    // On ignore les RC refusés (un refus doit pouvoir être re-déclaré)
+    const [doublons] = await pool.query(
+      `SELECT id FROM rc WHERE utilisateur_id = ? AND date_travail = ? AND statut != 'Refusé'`,
+      [utilisateur_id, date_travail]
+    );
+    if (doublons.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `Un RC a déjà été déclaré pour ${empRows[0].prenom} ${empRows[0].nom} à la date du ${date_travail}. Choisissez une autre date ou modifiez la déclaration existante.`
+      });
+    }
+
     // Créer un RC par jour déclaré, statut "Validé Chef" directement (le chef déclare = validation niveau 1 déjà faite)
     const idsCreated = [];
     for (let i = 0; i < nombre_jours; i++) {
