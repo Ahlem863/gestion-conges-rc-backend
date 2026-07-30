@@ -220,21 +220,43 @@ async function traiterFormatHistorique(lignes, res) {
         );
       }
 
-      const aInserer = [];
-
-      // RC consommés : datés sur les vrais dimanches du mois où le congé a été pris
+      // RC consommés : datés sur les vrais dimanches du mois où le congé a été pris.
+      // Pour chaque mois avec conso > 0, on crée AUSSI une demande de congé "Validée"
+      // (période de `conso` jours consécutifs, démarrant au 1er du mois) et on relie
+      // les RC consommés à cette demande, afin que « Congés (info) » affiche l'historique.
       for (const l of lignesTri) {
         if (l.conso > 0) {
-          const pool_ = dimanchesDuMois(ANNEE_REFERENCE, l.mois);
-          const dates = cyclerSur(pool_, l.conso);
+          const poolMois = dimanchesDuMois(ANNEE_REFERENCE, l.mois);
+          const dates = cyclerSur(poolMois, l.conso);
+
+          const rcIdsDuMois = [];
           for (const d of dates) {
-            aInserer.push({
-              date_travail: formatDateSQL(d),
-              date_acquisition: formatDateSQL(d),
-              date_expiration: formatDateSQL(ajouterMois(d, 3)),
-              statut: 'Utilisé',
-              motif: 'Import historique - congé pris',
-            });
+            const [insertRc] = await pool.query(
+              `INSERT INTO rc (utilisateur_id, date_travail, motif, date_acquisition, date_expiration, statut)
+               VALUES (?, ?, 'Import historique - congé pris', ?, ?, 'Utilisé')`,
+              [utilisateur_id, formatDateSQL(d), formatDateSQL(d), formatDateSQL(ajouterMois(d, 3))]
+            );
+            rcIdsDuMois.push(insertRc.insertId);
+            rcCreés++;
+          }
+
+          // Période de congé reconstituée : `conso` jours consécutifs à partir du 1er du mois
+          const dateDebut = new Date(ANNEE_REFERENCE, l.mois - 1, 1);
+          const dateFin = new Date(dateDebut);
+          dateFin.setDate(dateFin.getDate() + l.conso - 1);
+
+          const [insertDemande] = await pool.query(
+            `INSERT INTO demandes_conge_rc (utilisateur_id, date_debut, date_fin, nombre_jours, statut, valide_par, commentaire)
+             VALUES (?, ?, ?, ?, 'Validée', NULL, 'Import historique')`,
+            [utilisateur_id, formatDateSQL(dateDebut), formatDateSQL(dateFin), l.conso]
+          );
+          const demande_id = insertDemande.insertId;
+
+          for (const rc_id of rcIdsDuMois) {
+            await pool.query(
+              `INSERT INTO demande_rc_details (demande_id, rc_id) VALUES (?, ?)`,
+              [demande_id, rc_id]
+            );
           }
         }
       }
@@ -242,20 +264,10 @@ async function traiterFormatHistorique(lignes, res) {
       // RC restant disponibles : datés dans la fenêtre sûre (aujourd'hui - 3 mois -> aujourd'hui)
       const datesDispo = cyclerSur(poolFenetreSure, Math.max(soldeFinalCible, 0));
       for (const d of datesDispo) {
-        aInserer.push({
-          date_travail: formatDateSQL(d),
-          date_acquisition: formatDateSQL(d),
-          date_expiration: formatDateSQL(ajouterMois(d, 3)),
-          statut: 'Disponible',
-          motif: 'Import historique - solde initial',
-        });
-      }
-
-      for (const l of aInserer) {
         await pool.query(
           `INSERT INTO rc (utilisateur_id, date_travail, motif, date_acquisition, date_expiration, statut)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [utilisateur_id, l.date_travail, l.motif, l.date_acquisition, l.date_expiration, l.statut]
+           VALUES (?, ?, 'Import historique - solde initial', ?, ?, 'Disponible')`,
+          [utilisateur_id, formatDateSQL(d), formatDateSQL(d), formatDateSQL(ajouterMois(d, 3))]
         );
         rcCreés++;
       }
