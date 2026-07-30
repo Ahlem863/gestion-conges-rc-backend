@@ -50,11 +50,26 @@ function dimanchesDansFenetre(debut, fin) {
 }
 
 // Retourne n dates en cyclant sur le pool fourni (si n > pool.length, on reboucle)
+// depuis le DÉBUT (dates les plus anciennes en premier).
 function cyclerSur(pool, n) {
   if (pool.length === 0) return [];
   const out = [];
   for (let i = 0; i < n; i++) {
     out.push(pool[i % pool.length]);
+  }
+  return out;
+}
+
+// Retourne n dates en cyclant sur le pool fourni depuis la FIN (dates les plus
+// récentes en premier). Utilisé pour les RC "Disponible" restants, afin qu'ils
+// soient toujours datés plus récemment que les RC déjà "Utilisé" — cohérent avec
+// la règle métier : on consomme toujours les RC les plus proches de l'expiration
+// (donc les plus anciens) en premier.
+function cyclerSurDepuisLaFin(pool, n) {
+  if (pool.length === 0) return [];
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push(pool[pool.length - 1 - (i % pool.length)]);
   }
   return out;
 }
@@ -233,7 +248,7 @@ async function traiterFormatHistorique(lignes, res) {
           for (const d of dates) {
             const [insertRc] = await pool.query(
               `INSERT INTO rc (utilisateur_id, date_travail, motif, date_acquisition, date_expiration, statut)
-               VALUES (?, ?, 'Import historique - congé pris', ?, ?, 'Utilisé')`,
+               VALUES (?, ?, 'Travail jour férié ou exceptionnel', ?, ?, 'Utilisé')`,
               [utilisateur_id, formatDateSQL(d), formatDateSQL(d), formatDateSQL(ajouterMois(d, 3))]
             );
             rcIdsDuMois.push(insertRc.insertId);
@@ -261,12 +276,14 @@ async function traiterFormatHistorique(lignes, res) {
         }
       }
 
-      // RC restant disponibles : datés dans la fenêtre sûre (aujourd'hui - 3 mois -> aujourd'hui)
-      const datesDispo = cyclerSur(poolFenetreSure, Math.max(soldeFinalCible, 0));
+      // RC restant disponibles : datés dans la fenêtre sûre (aujourd'hui - 3 mois -> aujourd'hui),
+      // en privilégiant les dates les plus RÉCENTES du pool (cyclerSurDepuisLaFin), pour que ces RC
+      // restent toujours plus récents que ceux déjà marqués "Utilisé" (cohérence FIFO).
+      const datesDispo = cyclerSurDepuisLaFin(poolFenetreSure, Math.max(soldeFinalCible, 0));
       for (const d of datesDispo) {
         await pool.query(
           `INSERT INTO rc (utilisateur_id, date_travail, motif, date_acquisition, date_expiration, statut)
-           VALUES (?, ?, 'Import historique - solde initial', ?, ?, 'Disponible')`,
+           VALUES (?, ?, 'Travail jour férié ou exceptionnel', ?, ?, 'Disponible')`,
           [utilisateur_id, formatDateSQL(d), formatDateSQL(d), formatDateSQL(ajouterMois(d, 3))]
         );
         rcCreés++;
