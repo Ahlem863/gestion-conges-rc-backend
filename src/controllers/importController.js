@@ -239,6 +239,8 @@ async function traiterFormatHistorique(lignes, res) {
       // Pour chaque mois avec conso > 0, on crée AUSSI une demande de congé "Validée"
       // (période de `conso` jours consécutifs, démarrant au 1er du mois) et on relie
       // les RC consommés à cette demande, afin que « Congés (info) » affiche l'historique.
+      let derniereDateUtilise = null; // pour garantir le FIFO strict ci-dessous
+
       for (const l of lignesTri) {
         if (l.conso > 0) {
           const poolMois = dimanchesDuMois(ANNEE_REFERENCE, l.mois);
@@ -253,6 +255,9 @@ async function traiterFormatHistorique(lignes, res) {
             );
             rcIdsDuMois.push(insertRc.insertId);
             rcCreés++;
+            if (derniereDateUtilise === null || d > derniereDateUtilise) {
+              derniereDateUtilise = d;
+            }
           }
 
           // Période de congé reconstituée : `conso` jours consécutifs à partir du 1er du mois
@@ -276,10 +281,32 @@ async function traiterFormatHistorique(lignes, res) {
         }
       }
 
-      // RC restant disponibles : datés dans la fenêtre sûre (aujourd'hui - 3 mois -> aujourd'hui),
-      // en privilégiant les dates les plus RÉCENTES du pool (cyclerSurDepuisLaFin), pour que ces RC
-      // restent toujours plus récents que ceux déjà marqués "Utilisé" (cohérence FIFO).
-      const datesDispo = cyclerSurDepuisLaFin(poolFenetreSure, Math.max(soldeFinalCible, 0));
+      // RC restant disponibles : pour garantir un FIFO STRICT (aucun "Disponible" ne doit
+      // être plus ancien qu'un "Utilisé" du même employé), la fenêtre de dates démarre le
+      // lendemain de la dernière date "Utilisé" de cet employé — jamais avant. Si l'employé
+      // n'a aucun RC "Utilisé", on retombe sur la fenêtre sûre standard (3 derniers mois).
+      let fenetrePersonnelleDebut = FENETRE_DEBUT;
+      if (derniereDateUtilise !== null) {
+        const lendemain = new Date(derniereDateUtilise);
+        lendemain.setDate(lendemain.getDate() + 1);
+        if (lendemain > fenetrePersonnelleDebut) {
+          fenetrePersonnelleDebut = lendemain;
+        }
+      }
+      let poolPersonnel = dimanchesDansFenetre(fenetrePersonnelleDebut, AUJOURDHUI);
+
+      // Cas limite : si aucun dimanche ne reste entre la dernière consommation et aujourd'hui
+      // (ex. dernier congé pris très récemment), on autorise à titre exceptionnel la réutilisation
+      // du dernier dimanche disponible avant AUJOURDHUI, en le signalant.
+      if (poolPersonnel.length === 0) {
+        avertissements.push(
+          `${matricule} (${data.nomComplet}) : aucun dimanche disponible après la dernière consommation pour dater le solde restant dans le respect strict du FIFO. ` +
+          `La fenêtre standard des 3 derniers mois a été utilisée à la place, ce qui peut créer une petite incohérence chronologique résiduelle à vérifier manuellement.`
+        );
+        poolPersonnel = poolFenetreSure;
+      }
+
+      const datesDispo = cyclerSurDepuisLaFin(poolPersonnel, Math.max(soldeFinalCible, 0));
       for (const d of datesDispo) {
         await pool.query(
           `INSERT INTO rc (utilisateur_id, date_travail, motif, date_acquisition, date_expiration, statut)
